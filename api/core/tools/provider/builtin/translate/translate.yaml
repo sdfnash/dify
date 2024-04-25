@@ -1,0 +1,13 @@
+identity:
+  author: liwen15
+  name: translate
+  label:
+    en_US: Translate
+    zh_Hans: 翻译
+    pt_BR: Translate
+  description:
+    en_US: A provider for the translation tool.
+    zh_Hans: 翻译工具的提供者。
+    pt_BR: A provider for the translation tool.
+  icon: icon.svg
+credentials_for_provider:

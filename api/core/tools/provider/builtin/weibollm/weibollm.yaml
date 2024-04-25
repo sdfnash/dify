@@ -1,0 +1,13 @@
+identity:
+  author: liwen15
+  name: weibollm
+  label:
+    en_US: WeiboLLM
+    zh_Hans: 微博大语言模型
+    pt_BR: WeiboLLM
+  description:
+    en_US: A provider for the weibo llm tool.
+    zh_Hans: weibo llm
+    pt_BR: A provider for the weibo llm tool.
+  icon: icon.svg
+credentials_for_provider:

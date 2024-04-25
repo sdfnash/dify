@@ -1,0 +1,26 @@
+identity:
+  name: translate
+  author: liwen15
+  label:
+    en_US: Translate
+    zh_Hans: 翻译
+    pt_BR: Translate
+description:
+  human:
+    en_US: A tool for translating text.
+    zh_Hans: 一个用于翻译文本的工具。
+    pt_BR: A tool for translating text.
+  llm: A tool for getting the current time.
+parameters:
+  - name: text
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Text
+      zh_Hans: 文本
+      pt_BR: Text
+    human_description:
+      en_US: Text to be translated.
+      zh_Hans: 需要翻译的文本。
+      pt_BR: Text to be translated.

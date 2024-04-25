@@ -1,0 +1,26 @@
+identity:
+  name: llm
+  author: liwen15
+  label:
+    en_US: llm
+    zh_Hans: 微博大语言模型
+    pt_BR: llm
+description:
+  human:
+    en_US: A tool for llm text.
+    zh_Hans: 微博大语言模型
+    pt_BR: A tool for llm text.
+  llm: A tool for llm text.
+parameters:
+  - name: text
+    type: string
+    required: true
+    form: llm
+    label:
+      en_US: Text
+      zh_Hans: 文本
+      pt_BR: Text
+    human_description:
+      en_US: Text to be llmd.
+      zh_Hans: llm问题
+      pt_BR: Text to be llmd.
