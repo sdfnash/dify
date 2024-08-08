@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Optional
 
@@ -21,7 +22,11 @@ class NodeType(Enum):
     QUESTION_CLASSIFIER = 'question-classifier'
     HTTP_REQUEST = 'http-request'
     TOOL = 'tool'
+    VARIABLE_AGGREGATOR = 'variable-aggregator'
     VARIABLE_ASSIGNER = 'variable-assigner'
+    LOOP = 'loop'
+    ITERATION = 'iteration'
+    PARAMETER_EXTRACTOR = 'parameter-extractor'
 
     @classmethod
     def value_of(cls, value: str) -> 'NodeType':
@@ -43,7 +48,8 @@ class SystemVariable(Enum):
     """
     QUERY = 'query'
     FILES = 'files'
-    CONVERSATION = 'conversation'
+    CONVERSATION_ID = 'conversation_id'
+    USER_ID = 'user_id'
 
     @classmethod
     def value_of(cls, value: str) -> 'SystemVariable':
@@ -67,6 +73,8 @@ class NodeRunMetadataKey(Enum):
     TOTAL_PRICE = 'total_price'
     CURRENCY = 'currency'
     TOOL_INFO = 'tool_info'
+    ITERATION_ID = 'iteration_id'
+    ITERATION_INDEX = 'iteration_index'
 
 
 class NodeRunResult(BaseModel):
@@ -75,9 +83,9 @@ class NodeRunResult(BaseModel):
     """
     status: WorkflowNodeExecutionStatus = WorkflowNodeExecutionStatus.RUNNING
 
-    inputs: Optional[dict] = None  # node inputs
+    inputs: Optional[Mapping[str, Any]] = None  # node inputs
     process_data: Optional[dict] = None  # process data
-    outputs: Optional[dict] = None  # node outputs
+    outputs: Optional[Mapping[str, Any]] = None  # node outputs
     metadata: Optional[dict[NodeRunMetadataKey, Any]] = None  # node metadata
 
     edge_source_handle: Optional[str] = None  # source handle id of node with multiple branches

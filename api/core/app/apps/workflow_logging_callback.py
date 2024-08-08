@@ -2,7 +2,7 @@ from typing import Optional
 
 from core.app.entities.queue_entities import AppQueueEvent
 from core.model_runtime.utils.encoders import jsonable_encoder
-from core.workflow.callbacks.base_workflow_callback import BaseWorkflowCallback
+from core.workflow.callbacks.base_workflow_callback import WorkflowCallback
 from core.workflow.entities.base_node_data_entities import BaseNodeData
 from core.workflow.entities.node_entities import NodeType
 
@@ -15,7 +15,7 @@ _TEXT_COLOR_MAPPING = {
 }
 
 
-class WorkflowLoggingCallback(BaseWorkflowCallback):
+class WorkflowLoggingCallback(WorkflowCallback):
 
     def __init__(self) -> None:
         self.current_node_id = None
@@ -101,6 +101,39 @@ class WorkflowLoggingCallback(BaseWorkflowCallback):
             self.print_text(f"Metadata: {jsonable_encoder(metadata) if metadata else ''}")
 
         self.print_text(text, color="pink", end="")
+
+    def on_workflow_iteration_started(self, 
+                                      node_id: str,
+                                      node_type: NodeType,
+                                      node_run_index: int = 1,
+                                      node_data: Optional[BaseNodeData] = None,
+                                      inputs: dict = None,
+                                      predecessor_node_id: Optional[str] = None,
+                                      metadata: Optional[dict] = None) -> None:
+        """
+        Publish iteration started
+        """
+        self.print_text("\n[on_workflow_iteration_started]", color='blue')
+        self.print_text(f"Node ID: {node_id}", color='blue')
+
+    def on_workflow_iteration_next(self, node_id: str, 
+                                   node_type: NodeType,
+                                   index: int, 
+                                   node_run_index: int,
+                                   output: Optional[dict]) -> None:
+        """
+        Publish iteration next
+        """
+        self.print_text("\n[on_workflow_iteration_next]", color='blue')
+
+    def on_workflow_iteration_completed(self, node_id: str, 
+                                        node_type: NodeType,
+                                        node_run_index: int,
+                                        outputs: dict) -> None:
+        """
+        Publish iteration completed
+        """
+        self.print_text("\n[on_workflow_iteration_completed]", color='blue')
 
     def on_event(self, event: AppQueueEvent) -> None:
         """

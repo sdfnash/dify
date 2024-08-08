@@ -1,5 +1,6 @@
 import pytest
 
+from core.app.entities.app_invoke_entities import InvokeFrom
 from core.workflow.entities.variable_pool import VariablePool
 from core.workflow.nodes.base_node import UserFrom
 from core.workflow.nodes.template_transform.template_transform_node import TemplateTransformNode
@@ -15,6 +16,7 @@ def test_execute_code(setup_code_executor_mock):
         app_id='1',
         workflow_id='1',
         user_id='1',
+        invoke_from=InvokeFrom.WEB_APP,
         user_from=UserFrom.END_USER,
         config={
             'id': '1',
@@ -36,9 +38,9 @@ def test_execute_code(setup_code_executor_mock):
     )
 
     # construct variable pool
-    pool = VariablePool(system_variables={}, user_inputs={})
-    pool.append_variable(node_id='1', variable_key_list=['123', 'args1'], value=1)
-    pool.append_variable(node_id='1', variable_key_list=['123', 'args2'], value=3)
+    pool = VariablePool(system_variables={}, user_inputs={}, environment_variables=[])
+    pool.add(['1', '123', 'args1'], 1)
+    pool.add(['1', '123', 'args2'], 3)
     
     # execute node
     result = node.run(pool)

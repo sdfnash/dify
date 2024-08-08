@@ -7,13 +7,14 @@ from core.callback_handler.index_tool_callback_handler import DatasetIndexToolCa
 from core.model_manager import ModelManager
 from core.model_runtime.entities.model_entities import ModelType
 from core.rag.datasource.retrieval_service import RetrievalService
-from core.rerank.rerank import RerankRunner
+from core.rag.rerank.rerank_model import RerankModelRunner
+from core.rag.retrieval.retrival_methods import RetrievalMethod
 from core.tools.tool.dataset_retriever.dataset_retriever_base_tool import DatasetRetrieverBaseTool
 from extensions.ext_database import db
 from models.dataset import Dataset, Document, DocumentSegment
 
 default_retrieval_model = {
-    'search_method': 'semantic_search',
+    'search_method': RetrievalMethod.SEMANTIC_SEARCH.value,
     'reranking_enable': False,
     'reranking_model': {
         'reranking_provider_name': '',
@@ -71,7 +72,7 @@ class DatasetMultiRetrieverTool(DatasetRetrieverBaseTool):
             model=self.reranking_model_name
         )
 
-        rerank_runner = RerankRunner(rerank_model_instance)
+        rerank_runner = RerankModelRunner(rerank_model_instance)
         all_documents = rerank_runner.run(query, all_documents, self.score_threshold, self.top_k)
 
         for hit_callback in self.hit_callbacks:
@@ -79,7 +80,7 @@ class DatasetMultiRetrieverTool(DatasetRetrieverBaseTool):
 
         document_score_list = {}
         for item in all_documents:
-            if 'score' in item.metadata and item.metadata['score']:
+            if item.metadata.get('score'):
                 document_score_list[item.metadata['doc_id']] = item.metadata['score']
 
         document_context_list = []
@@ -99,9 +100,9 @@ class DatasetMultiRetrieverTool(DatasetRetrieverBaseTool):
                                                                                        float('inf')))
             for segment in sorted_segments:
                 if segment.answer:
-                    document_context_list.append(f'question:{segment.content} answer:{segment.answer}')
+                    document_context_list.append(f'question:{segment.get_sign_content()} answer:{segment.answer}')
                 else:
-                    document_context_list.append(segment.content)
+                    document_context_list.append(segment.get_sign_content())
             if self.return_resource:
                 context_list = []
                 resource_number = 1
@@ -176,10 +177,13 @@ class DatasetMultiRetrieverTool(DatasetRetrieverBaseTool):
                                                           dataset_id=dataset.id,
                                                           query=query,
                                                           top_k=self.top_k,
-                                                          score_threshold=retrieval_model['score_threshold']
+                                                          score_threshold=retrieval_model.get('score_threshold', .0)
                                                           if retrieval_model['score_threshold_enabled'] else None,
-                                                          reranking_model=retrieval_model['reranking_model']
-                                                          if retrieval_model['reranking_enable'] else None
+                                                          reranking_model=retrieval_model.get('reranking_model', None)
+                                                          if retrieval_model['reranking_enable'] else None,
+                                                          reranking_mode=retrieval_model.get('reranking_mode')
+                                                          if retrieval_model.get('reranking_mode') else 'reranking_model',
+                                                          weights=retrieval_model.get('weights', None),
                                                           )
 
                     all_documents.extend(documents)

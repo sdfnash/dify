@@ -1,5 +1,7 @@
 from typing import Any, cast
 
+from sqlalchemy import func
+
 from core.app.app_config.entities import DatasetRetrieveConfigEntity
 from core.app.entities.app_invoke_entities import ModelConfigWithCredentialsEntity
 from core.entities.agent_entities import PlanningStrategy
@@ -9,6 +11,7 @@ from core.model_manager import ModelInstance, ModelManager
 from core.model_runtime.entities.model_entities import ModelFeature, ModelType
 from core.model_runtime.model_providers.__base.large_language_model import LargeLanguageModel
 from core.rag.retrieval.dataset_retrieval import DatasetRetrieval
+from core.rag.retrieval.retrival_methods import RetrievalMethod
 from core.workflow.entities.base_node_data_entities import BaseNodeData
 from core.workflow.entities.node_entities import NodeRunResult, NodeType
 from core.workflow.entities.variable_pool import VariablePool
@@ -19,7 +22,7 @@ from models.dataset import Dataset, Document, DocumentSegment
 from models.workflow import WorkflowNodeExecutionStatus
 
 default_retrieval_model = {
-    'search_method': 'semantic_search',
+    'search_method': RetrievalMethod.SEMANTIC_SEARCH.value,
     'reranking_enable': False,
     'reranking_model': {
         'reranking_provider_name': '',
@@ -38,7 +41,8 @@ class KnowledgeRetrievalNode(BaseNode):
         node_data: KnowledgeRetrievalNodeData = cast(self._node_data_cls, self.node_data)
 
         # extract variables
-        query = variable_pool.get_variable_value(variable_selector=node_data.query_variable_selector)
+        variable = variable_pool.get_any(node_data.query_variable_selector)
+        query = variable
         variables = {
             'query': query
         }
@@ -73,30 +77,33 @@ class KnowledgeRetrievalNode(BaseNode):
 
     def _fetch_dataset_retriever(self, node_data: KnowledgeRetrievalNodeData, query: str) -> list[
         dict[str, Any]]:
-        """
-        A dataset tool is a tool that can be used to retrieve information from a dataset
-        :param node_data: node data
-        :param query: query
-        """
-        tools = []
         available_datasets = []
         dataset_ids = node_data.dataset_ids
-        for dataset_id in dataset_ids:
-            # get dataset from dataset id
-            dataset = db.session.query(Dataset).filter(
-                Dataset.tenant_id == self.tenant_id,
-                Dataset.id == dataset_id
-            ).first()
 
+        # Subquery: Count the number of available documents for each dataset
+        subquery = db.session.query(
+            Document.dataset_id,
+            func.count(Document.id).label('available_document_count')
+        ).filter(
+            Document.indexing_status == 'completed',
+            Document.enabled == True,
+            Document.archived == False,
+            Document.dataset_id.in_(dataset_ids)
+        ).group_by(Document.dataset_id).having(
+            func.count(Document.id) > 0
+        ).subquery()
+
+        results = db.session.query(Dataset).join(
+            subquery, Dataset.id == subquery.c.dataset_id
+        ).filter(
+            Dataset.tenant_id == self.tenant_id,
+            Dataset.id.in_(dataset_ids)
+        ).all()
+
+        for dataset in results:
             # pass if dataset is not available
             if not dataset:
                 continue
-
-            # pass if dataset is not available
-            if (dataset and dataset.available_document_count == 0
-                    and dataset.available_document_count == 0):
-                continue
-
             available_datasets.append(dataset)
         all_documents = []
         dataset_retrieval = DatasetRetrieval()
@@ -131,22 +138,45 @@ class KnowledgeRetrievalNode(BaseNode):
                     planning_strategy=planning_strategy
                 )
         elif node_data.retrieval_mode == DatasetRetrieveConfigEntity.RetrieveStrategy.MULTIPLE.value:
+            if node_data.multiple_retrieval_config.reranking_mode == 'reranking_model':
+                reranking_model = {
+                    'reranking_provider_name': node_data.multiple_retrieval_config.reranking_model.provider,
+                    'reranking_model_name': node_data.multiple_retrieval_config.reranking_model.model
+                }
+                weights = None
+            elif node_data.multiple_retrieval_config.reranking_mode == 'weighted_score':
+                reranking_model = None
+                weights = {
+                    'vector_setting': {
+                        "vector_weight": node_data.multiple_retrieval_config.weights.vector_setting.vector_weight,
+                        "embedding_provider_name": node_data.multiple_retrieval_config.weights.vector_setting.embedding_provider_name,
+                        "embedding_model_name": node_data.multiple_retrieval_config.weights.vector_setting.embedding_model_name,
+                    },
+                    'keyword_setting': {
+                        "keyword_weight": node_data.multiple_retrieval_config.weights.keyword_setting.keyword_weight
+                    }
+                }
+            else:
+                reranking_model = None
+                weights = None
             all_documents = dataset_retrieval.multiple_retrieve(self.app_id, self.tenant_id, self.user_id,
                                                                 self.user_from.value,
                                                                 available_datasets, query,
                                                                 node_data.multiple_retrieval_config.top_k,
                                                                 node_data.multiple_retrieval_config.score_threshold,
-                                                                node_data.multiple_retrieval_config.reranking_model.provider,
-                                                                node_data.multiple_retrieval_config.reranking_model.model)
+                                                                node_data.multiple_retrieval_config.reranking_mode,
+                                                                reranking_model,
+                                                                weights,
+                                                                node_data.multiple_retrieval_config.reranking_enable,
+                                                                )
 
         context_list = []
         if all_documents:
             document_score_list = {}
             for item in all_documents:
-                if 'score' in item.metadata and item.metadata['score']:
+                if item.metadata.get('score'):
                     document_score_list[item.metadata['doc_id']] = item.metadata['score']
 
-            document_context_list = []
             index_node_ids = [document.metadata['doc_id'] for document in all_documents]
             segments = DocumentSegment.query.filter(
                 DocumentSegment.dataset_id.in_(dataset_ids),
@@ -160,11 +190,6 @@ class KnowledgeRetrievalNode(BaseNode):
                 sorted_segments = sorted(segments,
                                          key=lambda segment: index_node_id_to_position.get(segment.index_node_id,
                                                                                            float('inf')))
-                for segment in sorted_segments:
-                    if segment.answer:
-                        document_context_list.append(f'question:{segment.content} answer:{segment.answer}')
-                    else:
-                        document_context_list.append(segment.content)
 
                 for segment in sorted_segments:
                     dataset = Dataset.query.filter_by(
@@ -197,9 +222,9 @@ class KnowledgeRetrievalNode(BaseNode):
                             'title': document.name
                         }
                         if segment.answer:
-                            source['content'] = f'question:{segment.content} \nanswer:{segment.answer}'
+                            source['content'] = f'question:{segment.get_sign_content()} \nanswer:{segment.answer}'
                         else:
-                            source['content'] = segment.content
+                            source['content'] = segment.get_sign_content()
                         context_list.append(source)
                         resource_number += 1
         return context_list

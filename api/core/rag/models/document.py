@@ -10,6 +10,8 @@ class Document(BaseModel):
 
     page_content: str
 
+    vector: Optional[list[float]] = None
+
     """Arbitrary metadata about the page content (e.g., source, relationships to other
         documents, etc.).
     """
@@ -50,7 +52,7 @@ class BaseDocumentTransformer(ABC):
                 ) -> Sequence[Document]:
                     raise NotImplementedError
 
-    """  # noqa: E501
+    """
 
     @abstractmethod
     def transform_documents(

@@ -1,9 +1,9 @@
 'use client'
 import type { FC } from 'react'
 import React from 'react'
-import cn from 'classnames'
 import { useTranslation } from 'react-i18next'
 import { useRouter } from 'next/navigation'
+import cn from '@/utils/classnames'
 import Log from '@/app/components/app/log'
 import WorkflowLog from '@/app/components/app/workflow-log'
 import Annotation from '@/app/components/app/annotation'
@@ -21,7 +21,7 @@ const LogAnnotation: FC<Props> = ({
 }) => {
   const { t } = useTranslation()
   const router = useRouter()
-  const { appDetail } = useAppStore()
+  const appDetail = useAppStore(state => state.appDetail)
 
   const options = [
     { value: PageType.log, text: t('appLog.title') },

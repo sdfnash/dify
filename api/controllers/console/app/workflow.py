@@ -3,23 +3,27 @@ import logging
 
 from flask import abort, request
 from flask_restful import Resource, marshal_with, reqparse
-from werkzeug.exceptions import InternalServerError, NotFound
+from werkzeug.exceptions import Forbidden, InternalServerError, NotFound
 
 import services
 from controllers.console import api
-from controllers.console.app.error import ConversationCompletedError, DraftWorkflowNotExist
+from controllers.console.app.error import ConversationCompletedError, DraftWorkflowNotExist, DraftWorkflowNotSync
 from controllers.console.app.wraps import get_app_model
 from controllers.console.setup import setup_required
 from controllers.console.wraps import account_initialization_required
 from core.app.apps.base_app_queue_manager import AppQueueManager
 from core.app.entities.app_invoke_entities import InvokeFrom
+from core.app.segments import factory
+from core.errors.error import AppInvokeQuotaExceededError
 from fields.workflow_fields import workflow_fields
 from fields.workflow_run_fields import workflow_run_node_execution_fields
 from libs import helper
 from libs.helper import TimestampField, uuid_value
 from libs.login import current_user, login_required
 from models.model import App, AppMode
+from services.app_dsl_service import AppDslService
 from services.app_generate_service import AppGenerateService
+from services.errors.app import WorkflowHashNotEqualError
 from services.workflow_service import WorkflowService
 
 logger = logging.getLogger(__name__)
@@ -35,6 +39,10 @@ class DraftWorkflowApi(Resource):
         """
         Get draft workflow
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+
         # fetch draft workflow by app_model
         workflow_service = WorkflowService()
         workflow = workflow_service.get_draft_workflow(app_model=app_model)
@@ -53,12 +61,19 @@ class DraftWorkflowApi(Resource):
         """
         Sync draft workflow
         """
-        content_type = request.headers.get('Content-Type')
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
+        content_type = request.headers.get('Content-Type', '')
 
         if 'application/json' in content_type:
             parser = reqparse.RequestParser()
             parser.add_argument('graph', type=dict, required=True, nullable=False, location='json')
             parser.add_argument('features', type=dict, required=True, nullable=False, location='json')
+            parser.add_argument('hash', type=str, required=False, location='json')
+            # TODO: set this to required=True after frontend is updated
+            parser.add_argument('environment_variables', type=list, required=False, location='json')
             args = parser.parse_args()
         elif 'text/plain' in content_type:
             try:
@@ -71,7 +86,9 @@ class DraftWorkflowApi(Resource):
 
                 args = {
                     'graph': data.get('graph'),
-                    'features': data.get('features')
+                    'features': data.get('features'),
+                    'hash': data.get('hash'),
+                    'environment_variables': data.get('environment_variables')
                 }
             except json.JSONDecodeError:
                 return {'message': 'Invalid JSON data'}, 400
@@ -79,17 +96,53 @@ class DraftWorkflowApi(Resource):
             abort(415)
 
         workflow_service = WorkflowService()
-        workflow = workflow_service.sync_draft_workflow(
-            app_model=app_model,
-            graph=args.get('graph'),
-            features=args.get('features'),
-            account=current_user
-        )
+
+        try:
+            environment_variables_list = args.get('environment_variables') or []
+            environment_variables = [factory.build_variable_from_mapping(obj) for obj in environment_variables_list]
+            workflow = workflow_service.sync_draft_workflow(
+                app_model=app_model,
+                graph=args['graph'],
+                features=args['features'],
+                unique_hash=args.get('hash'),
+                account=current_user,
+                environment_variables=environment_variables,
+            )
+        except WorkflowHashNotEqualError:
+            raise DraftWorkflowNotSync()
 
         return {
             "result": "success",
+            "hash": workflow.unique_hash,
             "updated_at": TimestampField().format(workflow.updated_at or workflow.created_at)
         }
+
+
+class DraftWorkflowImportApi(Resource):
+    @setup_required
+    @login_required
+    @account_initialization_required
+    @get_app_model(mode=[AppMode.ADVANCED_CHAT, AppMode.WORKFLOW])
+    @marshal_with(workflow_fields)
+    def post(self, app_model: App):
+        """
+        Import draft workflow
+        """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+
+        parser = reqparse.RequestParser()
+        parser.add_argument('data', type=str, required=True, nullable=False, location='json')
+        args = parser.parse_args()
+
+        workflow = AppDslService.import_and_overwrite_workflow(
+            app_model=app_model,
+            data=args['data'],
+            account=current_user
+        )
+
+        return workflow
 
 
 class AdvancedChatDraftWorkflowRunApi(Resource):
@@ -101,6 +154,10 @@ class AdvancedChatDraftWorkflowRunApi(Resource):
         """
         Run draft workflow
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
         parser = reqparse.RequestParser()
         parser.add_argument('inputs', type=dict, location='json')
         parser.add_argument('query', type=str, required=True, location='json', default='')
@@ -128,6 +185,79 @@ class AdvancedChatDraftWorkflowRunApi(Resource):
             logging.exception("internal server error.")
             raise InternalServerError()
 
+class AdvancedChatDraftRunIterationNodeApi(Resource):
+    @setup_required
+    @login_required
+    @account_initialization_required
+    @get_app_model(mode=[AppMode.ADVANCED_CHAT])
+    def post(self, app_model: App, node_id: str):
+        """
+        Run draft workflow iteration node
+        """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
+        parser = reqparse.RequestParser()
+        parser.add_argument('inputs', type=dict, location='json')
+        args = parser.parse_args()
+
+        try:
+            response = AppGenerateService.generate_single_iteration(
+                app_model=app_model,
+                user=current_user,
+                node_id=node_id,
+                args=args,
+                streaming=True
+            )
+
+            return helper.compact_generate_response(response)
+        except services.errors.conversation.ConversationNotExistsError:
+            raise NotFound("Conversation Not Exists.")
+        except services.errors.conversation.ConversationCompletedError:
+            raise ConversationCompletedError()
+        except ValueError as e:
+            raise e
+        except Exception as e:
+            logging.exception("internal server error.")
+            raise InternalServerError()
+
+class WorkflowDraftRunIterationNodeApi(Resource):
+    @setup_required
+    @login_required
+    @account_initialization_required
+    @get_app_model(mode=[AppMode.WORKFLOW])
+    def post(self, app_model: App, node_id: str):
+        """
+        Run draft workflow iteration node
+        """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
+        parser = reqparse.RequestParser()
+        parser.add_argument('inputs', type=dict, location='json')
+        args = parser.parse_args()
+
+        try:
+            response = AppGenerateService.generate_single_iteration(
+                app_model=app_model,
+                user=current_user,
+                node_id=node_id,
+                args=args,
+                streaming=True
+            )
+
+            return helper.compact_generate_response(response)
+        except services.errors.conversation.ConversationNotExistsError:
+            raise NotFound("Conversation Not Exists.")
+        except services.errors.conversation.ConversationCompletedError:
+            raise ConversationCompletedError()
+        except ValueError as e:
+            raise e
+        except Exception as e:
+            logging.exception("internal server error.")
+            raise InternalServerError()
 
 class DraftWorkflowRunApi(Resource):
     @setup_required
@@ -138,6 +268,10 @@ class DraftWorkflowRunApi(Resource):
         """
         Run draft workflow
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
         parser = reqparse.RequestParser()
         parser.add_argument('inputs', type=dict, required=True, nullable=False, location='json')
         parser.add_argument('files', type=list, required=False, location='json')
@@ -153,7 +287,7 @@ class DraftWorkflowRunApi(Resource):
             )
 
             return helper.compact_generate_response(response)
-        except ValueError as e:
+        except (ValueError, AppInvokeQuotaExceededError) as e:
             raise e
         except Exception as e:
             logging.exception("internal server error.")
@@ -169,6 +303,10 @@ class WorkflowTaskStopApi(Resource):
         """
         Stop workflow task
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
         AppQueueManager.set_stop_flag(task_id, InvokeFrom.DEBUGGER, current_user.id)
 
         return {
@@ -186,6 +324,10 @@ class DraftWorkflowNodeRunApi(Resource):
         """
         Run draft workflow node
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
         parser = reqparse.RequestParser()
         parser.add_argument('inputs', type=dict, required=True, nullable=False, location='json')
         args = parser.parse_args()
@@ -212,6 +354,10 @@ class PublishedWorkflowApi(Resource):
         """
         Get published workflow
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
         # fetch published workflow by app_model
         workflow_service = WorkflowService()
         workflow = workflow_service.get_published_workflow(app_model=app_model)
@@ -227,6 +373,10 @@ class PublishedWorkflowApi(Resource):
         """
         Publish workflow
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
         workflow_service = WorkflowService()
         workflow = workflow_service.publish_workflow(app_model=app_model, account=current_user)
 
@@ -245,6 +395,10 @@ class DefaultBlockConfigsApi(Resource):
         """
         Get default block config
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
         # Get default block configs
         workflow_service = WorkflowService()
         return workflow_service.get_default_block_configs()
@@ -259,6 +413,10 @@ class DefaultBlockConfigApi(Resource):
         """
         Get default block config
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
         parser = reqparse.RequestParser()
         parser.add_argument('q', type=str, location='args')
         args = parser.parse_args()
@@ -289,6 +447,10 @@ class ConvertToWorkflowApi(Resource):
         Convert expert mode of chatbot app to workflow mode
         Convert Completion App to Workflow App
         """
+        # The role of the current user in the ta table must be admin, owner, or editor
+        if not current_user.is_editor:
+            raise Forbidden()
+        
         if request.data:
             parser = reqparse.RequestParser()
             parser.add_argument('name', type=str, required=False, nullable=True, location='json')
@@ -313,10 +475,13 @@ class ConvertToWorkflowApi(Resource):
 
 
 api.add_resource(DraftWorkflowApi, '/apps/<uuid:app_id>/workflows/draft')
+api.add_resource(DraftWorkflowImportApi, '/apps/<uuid:app_id>/workflows/draft/import')
 api.add_resource(AdvancedChatDraftWorkflowRunApi, '/apps/<uuid:app_id>/advanced-chat/workflows/draft/run')
 api.add_resource(DraftWorkflowRunApi, '/apps/<uuid:app_id>/workflows/draft/run')
 api.add_resource(WorkflowTaskStopApi, '/apps/<uuid:app_id>/workflow-runs/tasks/<string:task_id>/stop')
 api.add_resource(DraftWorkflowNodeRunApi, '/apps/<uuid:app_id>/workflows/draft/nodes/<string:node_id>/run')
+api.add_resource(AdvancedChatDraftRunIterationNodeApi, '/apps/<uuid:app_id>/advanced-chat/workflows/draft/iteration/nodes/<string:node_id>/run')
+api.add_resource(WorkflowDraftRunIterationNodeApi, '/apps/<uuid:app_id>/workflows/draft/iteration/nodes/<string:node_id>/run')
 api.add_resource(PublishedWorkflowApi, '/apps/<uuid:app_id>/workflows/publish')
 api.add_resource(DefaultBlockConfigsApi, '/apps/<uuid:app_id>/workflows/default-workflow-block-configs')
 api.add_resource(DefaultBlockConfigApi, '/apps/<uuid:app_id>/workflows/default-workflow-block-configs'

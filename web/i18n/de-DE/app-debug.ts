@@ -24,7 +24,7 @@ const translation = {
     resetConfig: 'Zurücksetzen',
     debugConfig: 'Debuggen',
     addFeature: 'Funktion hinzufügen',
-    automatic: 'Automatisch',
+    automatic: 'Generieren',
     stopResponding: 'Antworten stoppen',
     agree: 'gefällt mir',
     disagree: 'gefällt mir nicht',
@@ -199,23 +199,6 @@ const translation = {
       },
     },
   },
-  automatic: {
-    title: 'Automatisierte Anwendungsorchestrierung',
-    description: 'Beschreiben Sie Ihr Szenario, Dify wird eine Anwendung für Sie orchestrieren.',
-    intendedAudience: 'Wer ist die Zielgruppe?',
-    intendedAudiencePlaceHolder: 'z.B. Student',
-    solveProblem: 'Welche Probleme hoffen sie, dass KI für sie lösen kann?',
-    solveProblemPlaceHolder: 'z.B. Erkenntnisse extrahieren und Informationen aus langen Berichten und Artikeln zusammenfassen',
-    generate: 'Generieren',
-    audiencesRequired: 'Zielgruppe erforderlich',
-    problemRequired: 'Problem erforderlich',
-    resTitle: 'Wir haben die folgende Anwendung für Sie orchestriert.',
-    apply: 'Diese Orchestrierung anwenden',
-    noData: 'Beschreiben Sie Ihren Anwendungsfall links, die Orchestrierungsvorschau wird hier angezeigt.',
-    loading: 'Orchestrieren der Anwendung für Sie...',
-    overwriteTitle: 'Bestehende Konfiguration überschreiben?',
-    overwriteMessage: 'Das Anwenden dieser Orchestrierung wird die bestehende Konfiguration überschreiben.',
-  },
   resetConfig: {
     title: 'Zurücksetzen bestätigen?',
     message:
@@ -313,7 +296,7 @@ const translation = {
   openingStatement: {
     title: 'Gesprächseröffner',
     add: 'Hinzufügen',
-    writeOpner: 'Eröffnung schreiben',
+    writeOpener: 'Eröffnung schreiben',
     placeholder: 'Schreiben Sie hier Ihre Eröffnungsnachricht, Sie können Variablen verwenden, versuchen Sie {{Variable}} zu tippen.',
     openingQuestion: 'Eröffnungsfragen',
     noDataPlaceHolder:

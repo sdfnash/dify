@@ -4,6 +4,8 @@ import time
 from collections.abc import Generator
 from typing import Any, Optional, Union, cast
 
+from constants.tts_auto_play_timeout import TTS_AUTO_PLAY_TIMEOUT, TTS_AUTO_PLAY_YIELD_CPU_TIME
+from core.app.apps.advanced_chat.app_generator_tts_publisher import AppGeneratorTTSPublisher, AudioTrunk
 from core.app.apps.base_app_queue_manager import AppQueueManager, PublishFrom
 from core.app.entities.app_invoke_entities import (
     AdvancedChatAppGenerateEntity,
@@ -12,6 +14,9 @@ from core.app.entities.queue_entities import (
     QueueAdvancedChatMessageEndEvent,
     QueueAnnotationReplyEvent,
     QueueErrorEvent,
+    QueueIterationCompletedEvent,
+    QueueIterationNextEvent,
+    QueueIterationStartEvent,
     QueueMessageReplaceEvent,
     QueueNodeFailedEvent,
     QueueNodeStartedEvent,
@@ -28,9 +33,11 @@ from core.app.entities.task_entities import (
     AdvancedChatTaskState,
     ChatbotAppBlockingResponse,
     ChatbotAppStreamResponse,
+    ChatflowStreamGenerateRoute,
     ErrorStreamResponse,
+    MessageAudioEndStreamResponse,
+    MessageAudioStreamResponse,
     MessageEndStreamResponse,
-    StreamGenerateRoute,
     StreamResponse,
 )
 from core.app.task_pipeline.based_generate_task_pipeline import BasedGenerateTaskPipeline
@@ -39,6 +46,7 @@ from core.app.task_pipeline.workflow_cycle_manage import WorkflowCycleManage
 from core.file.file_obj import FileVar
 from core.model_runtime.entities.llm_entities import LLMUsage
 from core.model_runtime.utils.encoders import jsonable_encoder
+from core.ops.ops_trace_manager import TraceQueueManager
 from core.workflow.entities.node_entities import NodeType, SystemVariable
 from core.workflow.nodes.answer.answer_node import AnswerNode
 from core.workflow.nodes.answer.entities import TextGenerateRouteChunk, VarGenerateRouteChunk
@@ -64,14 +72,17 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
     _workflow: Workflow
     _user: Union[Account, EndUser]
     _workflow_system_variables: dict[SystemVariable, Any]
+    _iteration_nested_relations: dict[str, list[str]]
 
-    def __init__(self, application_generate_entity: AdvancedChatAppGenerateEntity,
-                 workflow: Workflow,
-                 queue_manager: AppQueueManager,
-                 conversation: Conversation,
-                 message: Message,
-                 user: Union[Account, EndUser],
-                 stream: bool) -> None:
+    def __init__(
+            self, application_generate_entity: AdvancedChatAppGenerateEntity,
+            workflow: Workflow,
+            queue_manager: AppQueueManager,
+            conversation: Conversation,
+            message: Message,
+            user: Union[Account, EndUser],
+            stream: bool
+    ) -> None:
         """
         Initialize AdvancedChatAppGenerateTaskPipeline.
         :param application_generate_entity: application generate entity
@@ -84,23 +95,30 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
         """
         super().__init__(application_generate_entity, queue_manager, user, stream)
 
+        if isinstance(self._user, EndUser):
+            user_id = self._user.session_id
+        else:
+            user_id = self._user.id
+
         self._workflow = workflow
         self._conversation = conversation
         self._message = message
         self._workflow_system_variables = {
             SystemVariable.QUERY: message.query,
             SystemVariable.FILES: application_generate_entity.files,
-            SystemVariable.CONVERSATION: conversation.id,
+            SystemVariable.CONVERSATION_ID: conversation.id,
+            SystemVariable.USER_ID: user_id
         }
 
         self._task_state = AdvancedChatTaskState(
             usage=LLMUsage.empty_usage()
         )
 
+        self._iteration_nested_relations = self._get_iteration_nested_relations(self._workflow.graph_dict)
         self._stream_generate_routes = self._get_stream_generate_routes()
         self._conversation_name_generate_thread = None
 
-    def process(self) -> Union[ChatbotAppBlockingResponse, Generator[ChatbotAppStreamResponse, None, None]]:
+    def process(self):
         """
         Process generate task pipeline.
         :return:
@@ -115,14 +133,15 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
             self._application_generate_entity.query
         )
 
-        generator = self._process_stream_response()
+        generator = self._wrapper_process_stream_response(
+            trace_manager=self._application_generate_entity.trace_manager
+        )
         if self._stream:
             return self._to_stream_response(generator)
         else:
             return self._to_blocking_response(generator)
 
-    def _to_blocking_response(self, generator: Generator[StreamResponse, None, None]) \
-            -> ChatbotAppBlockingResponse:
+    def _to_blocking_response(self, generator: Generator[StreamResponse, None, None]) -> ChatbotAppBlockingResponse:
         """
         Process blocking response.
         :return:
@@ -152,8 +171,7 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
 
         raise Exception('Queue listening stopped unexpectedly.')
 
-    def _to_stream_response(self, generator: Generator[StreamResponse, None, None]) \
-            -> Generator[ChatbotAppStreamResponse, None, None]:
+    def _to_stream_response(self, generator: Generator[StreamResponse, None, None]) -> Generator[ChatbotAppStreamResponse, Any, None]:
         """
         To stream response.
         :return:
@@ -166,12 +184,77 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                 stream_response=stream_response
             )
 
-    def _process_stream_response(self) -> Generator[StreamResponse, None, None]:
+    def _listenAudioMsg(self, publisher, task_id: str):
+        if not publisher:
+            return None
+        audio_msg: AudioTrunk = publisher.checkAndGetAudio()
+        if audio_msg and audio_msg.status != "finish":
+            return MessageAudioStreamResponse(audio=audio_msg.audio, task_id=task_id)
+        return None
+
+    def _wrapper_process_stream_response(self, trace_manager: Optional[TraceQueueManager] = None) -> \
+            Generator[StreamResponse, None, None]:
+
+        publisher = None
+        task_id = self._application_generate_entity.task_id
+        tenant_id = self._application_generate_entity.app_config.tenant_id
+        features_dict = self._workflow.features_dict
+
+        if features_dict.get('text_to_speech') and features_dict['text_to_speech'].get('enabled') and features_dict[
+                'text_to_speech'].get('autoPlay') == 'enabled':
+            publisher = AppGeneratorTTSPublisher(tenant_id, features_dict['text_to_speech'].get('voice'))
+        for response in self._process_stream_response(publisher=publisher, trace_manager=trace_manager):
+            while True:
+                audio_response = self._listenAudioMsg(publisher, task_id=task_id)
+                if audio_response:
+                    yield audio_response
+                else:
+                    break
+            yield response
+
+        start_listener_time = time.time()
+        # timeout
+        while (time.time() - start_listener_time) < TTS_AUTO_PLAY_TIMEOUT:
+            try:
+                if not publisher:
+                    break
+                audio_trunk = publisher.checkAndGetAudio()
+                if audio_trunk is None:
+                    # release cpu
+                    # sleep 20 ms ( 40ms => 1280 byte audio file,20ms => 640 byte audio file)
+                    time.sleep(TTS_AUTO_PLAY_YIELD_CPU_TIME)
+                    continue
+                if audio_trunk.status == "finish":
+                    break
+                else:
+                    start_listener_time = time.time()
+                    yield MessageAudioStreamResponse(audio=audio_trunk.audio, task_id=task_id)
+            except Exception as e:
+                logger.error(e)
+                break
+        yield MessageAudioEndStreamResponse(audio='', task_id=task_id)
+
+    def _process_stream_response(
+            self,
+            publisher: AppGeneratorTTSPublisher,
+            trace_manager: Optional[TraceQueueManager] = None
+    ) -> Generator[StreamResponse, None, None]:
         """
         Process stream response.
         :return:
         """
         for message in self._queue_manager.listen():
+            if (message.event
+                    and hasattr(message.event, 'metadata')
+                    and message.event.metadata
+                    and message.event.metadata.get('is_answer_previous_node', False)
+                    and publisher):
+                publisher.publish(message=message)
+            elif (hasattr(message.event, 'execution_metadata')
+                  and message.event.execution_metadata
+                  and message.event.execution_metadata.get('is_answer_previous_node', False)
+                  and publisher):
+                publisher.publish(message=message)
             event = message.event
 
             if isinstance(event, QueueErrorEvent):
@@ -198,6 +281,8 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                 # search stream_generate_routes if node id is answer start at node
                 if not self._task_state.current_stream_generate_state and event.node_id in self._stream_generate_routes:
                     self._task_state.current_stream_generate_state = self._stream_generate_routes[event.node_id]
+                    # reset current route position to 0
+                    self._task_state.current_stream_generate_state.current_route_position = 0
 
                     # generate stream outputs when node started
                     yield from self._generate_stream_outputs_when_node_started()
@@ -219,8 +304,26 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                     task_id=self._application_generate_entity.task_id,
                     workflow_node_execution=workflow_node_execution
                 )
+
+                if isinstance(event, QueueNodeFailedEvent):
+                    yield from self._handle_iteration_exception(
+                        task_id=self._application_generate_entity.task_id,
+                        error=f'Child node failed: {event.error}'
+                    )
+            elif isinstance(event, QueueIterationStartEvent | QueueIterationNextEvent | QueueIterationCompletedEvent):
+                if isinstance(event, QueueIterationNextEvent):
+                    # clear ran node execution infos of current iteration
+                    iteration_relations = self._iteration_nested_relations.get(event.node_id)
+                    if iteration_relations:
+                        for node_id in iteration_relations:
+                            self._task_state.ran_node_execution_infos.pop(node_id, None)
+
+                yield self._handle_iteration_to_stream_response(self._application_generate_entity.task_id, event)
+                self._handle_iteration_operation(event)
             elif isinstance(event, QueueStopEvent | QueueWorkflowSucceededEvent | QueueWorkflowFailedEvent):
-                workflow_run = self._handle_workflow_finished(event)
+                workflow_run = self._handle_workflow_finished(
+                    event, conversation_id=self._conversation.id, trace_manager=trace_manager
+                )
                 if workflow_run:
                     yield self._workflow_finish_to_stream_response(
                         task_id=self._application_generate_entity.task_id,
@@ -257,10 +360,6 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                 self._handle_retriever_resources(event)
             elif isinstance(event, QueueAnnotationReplyEvent):
                 self._handle_annotation_reply(event)
-            # elif isinstance(event, QueueMessageFileEvent):
-            #     response = self._message_file_to_stream_response(event)
-            #     if response:
-            #         yield response
             elif isinstance(event, QueueTextChunkEvent):
                 delta_text = event.text
                 if delta_text is None:
@@ -284,7 +383,8 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                 yield self._ping_stream_response()
             else:
                 continue
-
+        if publisher:
+            publisher.publish(None)
         if self._conversation_name_generate_thread:
             self._conversation_name_generate_thread.join()
 
@@ -337,7 +437,7 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
             **extras
         )
 
-    def _get_stream_generate_routes(self) -> dict[str, StreamGenerateRoute]:
+    def _get_stream_generate_routes(self) -> dict[str, ChatflowStreamGenerateRoute]:
         """
         Get stream generate routes.
         :return:
@@ -360,7 +460,7 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                 continue
 
             for start_node_id in start_node_ids:
-                stream_generate_routes[start_node_id] = StreamGenerateRoute(
+                stream_generate_routes[start_node_id] = ChatflowStreamGenerateRoute(
                     answer_node_id=answer_node_id,
                     generate_route=generate_route
                 )
@@ -385,6 +485,18 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                 ingoing_edges.append(edge)
 
         if not ingoing_edges:
+            # check if it's the first node in the iteration
+            target_node = next((node for node in nodes if node.get('id') == target_node_id), None)
+            if not target_node:
+                return []
+
+            node_iteration_id = target_node.get('data', {}).get('iteration_id')
+            # get iteration start node id
+            for node in nodes:
+                if node.get('id') == node_iteration_id:
+                    if node.get('data', {}).get('start_node_id') == target_node_id:
+                        return [target_node_id]
+
             return []
 
         start_node_ids = []
@@ -395,14 +507,23 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                 continue
 
             node_type = source_node.get('data', {}).get('type')
+            node_iteration_id = source_node.get('data', {}).get('iteration_id')
+            iteration_start_node_id = None
+            if node_iteration_id:
+                iteration_node = next((node for node in nodes if node.get('id') == node_iteration_id), None)
+                iteration_start_node_id = iteration_node.get('data', {}).get('start_node_id')
+
             if node_type in [
                 NodeType.ANSWER.value,
                 NodeType.IF_ELSE.value,
-                NodeType.QUESTION_CLASSIFIER.value
+                NodeType.QUESTION_CLASSIFIER.value,
+                NodeType.ITERATION.value,
+                NodeType.LOOP.value
             ]:
                 start_node_id = target_node_id
                 start_node_ids.append(start_node_id)
-            elif node_type == NodeType.START.value:
+            elif node_type == NodeType.START.value or \
+                    node_iteration_id is not None and iteration_start_node_id == source_node.get('id'):
                 start_node_id = source_node_id
                 start_node_ids.append(start_node_id)
             else:
@@ -412,6 +533,26 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
 
         return start_node_ids
 
+    def _get_iteration_nested_relations(self, graph: dict) -> dict[str, list[str]]:
+        """
+        Get iteration nested relations.
+        :param graph: graph
+        :return:
+        """
+        nodes = graph.get('nodes')
+
+        iteration_ids = [node.get('id') for node in nodes
+                         if node.get('data', {}).get('type') in [
+                             NodeType.ITERATION.value,
+                             NodeType.LOOP.value,
+                         ]]
+
+        return {
+            iteration_id: [
+                node.get('id') for node in nodes if node.get('data', {}).get('iteration_id') == iteration_id
+            ] for iteration_id in iteration_ids
+        }
+
     def _generate_stream_outputs_when_node_started(self) -> Generator:
         """
         Generate stream outputs.
@@ -419,20 +560,20 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
         """
         if self._task_state.current_stream_generate_state:
             route_chunks = self._task_state.current_stream_generate_state.generate_route[
-                           self._task_state.current_stream_generate_state.current_route_position:]
+                           self._task_state.current_stream_generate_state.current_route_position:
+                           ]
 
             for route_chunk in route_chunks:
                 if route_chunk.type == 'text':
                     route_chunk = cast(TextGenerateRouteChunk, route_chunk)
-                    for token in route_chunk.text:
-                        # handle output moderation chunk
-                        should_direct_answer = self._handle_output_moderation_chunk(token)
-                        if should_direct_answer:
-                            continue
 
-                        self._task_state.answer += token
-                        yield self._message_to_stream_response(token, self._message.id)
-                        time.sleep(0.01)
+                    # handle output moderation chunk
+                    should_direct_answer = self._handle_output_moderation_chunk(route_chunk.text)
+                    if should_direct_answer:
+                        continue
+
+                    self._task_state.answer += route_chunk.text
+                    yield self._message_to_stream_response(route_chunk.text, self._message.id)
                 else:
                     break
 
@@ -440,7 +581,8 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
 
             # all route chunks are generated
             if self._task_state.current_stream_generate_state.current_route_position == len(
-                    self._task_state.current_stream_generate_state.generate_route):
+                    self._task_state.current_stream_generate_state.generate_route
+            ):
                 self._task_state.current_stream_generate_state = None
 
     def _generate_stream_outputs_when_node_finished(self) -> Optional[Generator]:
@@ -449,7 +591,7 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
         :return:
         """
         if not self._task_state.current_stream_generate_state:
-            return None
+            return
 
         route_chunks = self._task_state.current_stream_generate_state.generate_route[
                        self._task_state.current_stream_generate_state.current_route_position:]
@@ -457,11 +599,10 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
         for route_chunk in route_chunks:
             if route_chunk.type == 'text':
                 route_chunk = cast(TextGenerateRouteChunk, route_chunk)
-                for token in route_chunk.text:
-                    self._task_state.answer += token
-                    yield self._message_to_stream_response(token, self._message.id)
-                    time.sleep(0.01)
+                self._task_state.answer += route_chunk.text
+                yield self._message_to_stream_response(route_chunk.text, self._message.id)
             else:
+                value = None
                 route_chunk = cast(VarGenerateRouteChunk, route_chunk)
                 value_selector = route_chunk.value_selector
                 if not value_selector:
@@ -473,6 +614,21 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                 if route_chunk_node_id == 'sys':
                     # system variable
                     value = self._workflow_system_variables.get(SystemVariable.value_of(value_selector[1]))
+                elif route_chunk_node_id in self._iteration_nested_relations:
+                    # it's a iteration variable
+                    if not self._iteration_state or route_chunk_node_id not in self._iteration_state.current_iterations:
+                        continue
+                    iteration_state = self._iteration_state.current_iterations[route_chunk_node_id]
+                    iterator = iteration_state.inputs
+                    if not iterator:
+                        continue
+                    iterator_selector = iterator.get('iterator_selector', [])
+                    if value_selector[1] == 'index':
+                        value = iteration_state.current_index
+                    elif value_selector[1] == 'item':
+                        value = iterator_selector[iteration_state.current_index] if iteration_state.current_index < len(
+                            iterator_selector
+                        ) else None
                 else:
                     # check chunk node id is before current node id or equal to current node id
                     if route_chunk_node_id not in self._task_state.ran_node_execution_infos:
@@ -490,7 +646,8 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
 
                     # get route chunk node execution
                     route_chunk_node_execution = db.session.query(WorkflowNodeExecution).filter(
-                        WorkflowNodeExecution.id == route_chunk_node_execution_info.workflow_node_execution_id).first()
+                        WorkflowNodeExecution.id == route_chunk_node_execution_info.workflow_node_execution_id
+                    ).first()
 
                     outputs = route_chunk_node_execution.outputs_dict
 
@@ -502,7 +659,7 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
                         else:
                             value = value.get(key)
 
-                if value:
+                if value is not None:
                     text = ''
                     if isinstance(value, str | int | float):
                         text = str(value)
@@ -552,7 +709,8 @@ class AdvancedChatAppGenerateTaskPipeline(BasedGenerateTaskPipeline, WorkflowCyc
 
         # all route chunks are generated
         if self._task_state.current_stream_generate_state.current_route_position == len(
-                self._task_state.current_stream_generate_state.generate_route):
+                self._task_state.current_stream_generate_state.generate_route
+        ):
             self._task_state.current_stream_generate_state = None
 
     def _is_stream_out_support(self, event: QueueTextChunkEvent) -> bool:

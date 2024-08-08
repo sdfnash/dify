@@ -322,12 +322,15 @@ const translation = {
       language: 'línguas',
       resolutionTooltip: 'Texto para voz timbre suporta idiomas.',
       voice: 'voz',
+      autoPlay: 'Reprodução automática',
+      autoPlayEnabled: 'ligar',
+      autoPlayDisabled: 'fecho',
     },
   },
   openingStatement: {
     title: 'Abertura da Conversa',
     add: 'Adicionar',
-    writeOpner: 'Escrever abertura',
+    writeOpener: 'Escrever abertura',
     placeholder: 'Escreva sua mensagem de abertura aqui, você pode usar variáveis, tente digitar {{variável}}.',
     openingQuestion: 'Perguntas de Abertura',
     noDataPlaceHolder:

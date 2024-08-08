@@ -1,13 +1,20 @@
 'use client'
 import type { FC } from 'react'
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import { useBoolean } from 'ahooks'
+import type { OffsetOptions, Placement } from '@floating-ui/react'
+import cn from '@/utils/classnames'
 import { PortalToFollowElem, PortalToFollowElemContent, PortalToFollowElemTrigger } from '@/app/components/base/portal-to-follow-elem'
 export type TooltipProps = {
-  position?: 'top' | 'right' | 'bottom' | 'left'
+  position?: Placement
   triggerMethod?: 'hover' | 'click'
+  disabled?: boolean
   popupContent: React.ReactNode
   children: React.ReactNode
   hideArrow?: boolean
+  popupClassName?: string
+  offset?: OffsetOptions
+  asChild?: boolean
 }
 
 const arrow = (
@@ -17,30 +24,80 @@ const arrow = (
 const Tooltip: FC<TooltipProps> = ({
   position = 'top',
   triggerMethod = 'hover',
+  disabled = false,
   popupContent,
   children,
   hideArrow,
+  popupClassName,
+  offset,
+  asChild,
 }) => {
   const [open, setOpen] = useState(false)
+  const [isHoverPopup, {
+    setTrue: setHoverPopup,
+    setFalse: setNotHoverPopup,
+  }] = useBoolean(false)
+
+  const isHoverPopupRef = useRef(isHoverPopup)
+  useEffect(() => {
+    isHoverPopupRef.current = isHoverPopup
+  }, [isHoverPopup])
+
+  const [isHoverTrigger, {
+    setTrue: setHoverTrigger,
+    setFalse: setNotHoverTrigger,
+  }] = useBoolean(false)
+
+  const isHoverTriggerRef = useRef(isHoverTrigger)
+  useEffect(() => {
+    isHoverTriggerRef.current = isHoverTrigger
+  }, [isHoverTrigger])
+
+  const handleLeave = (isTrigger: boolean) => {
+    if (isTrigger)
+      setNotHoverTrigger()
+
+    else
+      setNotHoverPopup()
+
+    // give time to move to the popup
+    setTimeout(() => {
+      if (!isHoverPopupRef.current && !isHoverTriggerRef.current)
+        setOpen(false)
+    }, 500)
+  }
 
   return (
     <PortalToFollowElem
-      open={open}
+      open={disabled ? false : open}
       onOpenChange={setOpen}
       placement={position}
-      offset={10}
+      offset={offset ?? 10}
     >
       <PortalToFollowElemTrigger
         onClick={() => triggerMethod === 'click' && setOpen(v => !v)}
-        onMouseEnter={() => triggerMethod === 'hover' && setOpen(true)}
-        onMouseLeave={() => triggerMethod === 'hover' && setOpen(false)}
+        onMouseEnter={() => {
+          if (triggerMethod === 'hover') {
+            setHoverTrigger()
+            setOpen(true)
+          }
+        }}
+        onMouseLeave={() => triggerMethod === 'hover' && handleLeave(true)}
+        asChild={asChild}
       >
         {children}
       </PortalToFollowElemTrigger>
       <PortalToFollowElemContent
         className="z-[9999]"
       >
-        <div className='relative px-3 py-2 text-xs font-normal text-gray-700 bg-white rounded-md shadow-lg'>
+        <div
+          className={cn(
+            'relative px-3 py-2 text-xs font-normal text-gray-700 bg-white rounded-md shadow-lg',
+            popupClassName,
+          )}
+          onMouseEnter={() => triggerMethod === 'hover' && setHoverPopup()}
+          onMouseLeave={() => triggerMethod === 'hover' && handleLeave(false)}
+        >
           {popupContent}
           {!hideArrow && arrow}
         </div>

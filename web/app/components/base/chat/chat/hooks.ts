@@ -6,7 +6,8 @@ import {
 } from 'react'
 import { useTranslation } from 'react-i18next'
 import { produce, setAutoFreeze } from 'immer'
-import dayjs from 'dayjs'
+import { useParams, usePathname } from 'next/navigation'
+import { v4 as uuidV4 } from 'uuid'
 import type {
   ChatConfig,
   ChatItem,
@@ -20,6 +21,8 @@ import { ssePost } from '@/service/base'
 import { replaceStringWithValues } from '@/app/components/app/configuration/prompt-value-panel'
 import type { Annotation } from '@/models/log'
 import { WorkflowRunningStatus } from '@/app/components/workflow/types'
+import useTimestamp from '@/hooks/use-timestamp'
+import { AudioPlayerManager } from '@/app/components/base/audio-btn/audio.player.manager'
 
 type GetAbortController = (abortController: AbortController) => void
 type SendCallback = {
@@ -78,8 +81,9 @@ export const useChat = (
   stopChat?: (taskId: string) => void,
 ) => {
   const { t } = useTranslation()
+  const { formatTime } = useTimestamp()
   const { notify } = useToastContext()
-  const connversationId = useRef('')
+  const conversationId = useRef('')
   const hasStopResponded = useRef(false)
   const [isResponding, setIsResponding] = useState(false)
   const isRespondingRef = useRef(false)
@@ -90,7 +94,8 @@ export const useChat = (
   const conversationMessagesAbortControllerRef = useRef<AbortController | null>(null)
   const suggestedQuestionsAbortControllerRef = useRef<AbortController | null>(null)
   const checkPromptVariables = useCheckPromptVariables()
-
+  const params = useParams()
+  const pathname = usePathname()
   useEffect(() => {
     setAutoFreeze(false)
     return () => {
@@ -147,7 +152,7 @@ export const useChat = (
   }, [stopChat, handleResponding])
 
   const handleRestart = useCallback(() => {
-    connversationId.current = ''
+    conversationId.current = ''
     taskIdRef.current = ''
     handleStop()
     const newChatList = config?.opening_statement
@@ -236,12 +241,14 @@ export const useChat = (
       isAnswer: true,
     }
 
+    let isInIteration = false
+
     handleResponding(true)
     hasStopResponded.current = false
 
     const bodyParams = {
       response_mode: 'streaming',
-      conversation_id: connversationId.current,
+      conversation_id: conversationId.current,
       ...data,
     }
     if (bodyParams?.files?.length) {
@@ -259,6 +266,19 @@ export const useChat = (
     let isAgentMode = false
     let hasSetResponseId = false
 
+    let ttsUrl = ''
+    let ttsIsPublic = false
+    if (params.token) {
+      ttsUrl = '/text-to-audio'
+      ttsIsPublic = true
+    }
+    else if (params.appId) {
+      if (pathname.search('explore/installed') > -1)
+        ttsUrl = `/installed-apps/${params.appId}/text-to-audio`
+      else
+        ttsUrl = `/apps/${params.appId}/text-to-audio`
+    }
+    const player = AudioPlayerManager.getInstance().getAudioPlayer(ttsUrl, ttsIsPublic, uuidV4(), 'none', 'none', (_: any): any => {})
     ssePost(
       url,
       {
@@ -282,7 +302,7 @@ export const useChat = (
           }
 
           if (isFirstMessage && newConversationId)
-            connversationId.current = newConversationId
+            conversationId.current = newConversationId
 
           taskIdRef.current = taskId
           if (messageId)
@@ -302,11 +322,11 @@ export const useChat = (
             return
 
           if (onConversationComplete)
-            onConversationComplete(connversationId.current)
+            onConversationComplete(conversationId.current)
 
-          if (connversationId.current && !hasStopResponded.current && onGetConvesationMessages) {
+          if (conversationId.current && !hasStopResponded.current && onGetConvesationMessages) {
             const { data }: any = await onGetConvesationMessages(
-              connversationId.current,
+              conversationId.current,
               newAbortController => conversationMessagesAbortControllerRef.current = newAbortController,
             )
             const newResponseItem = data.find((item: any) => item.id === responseItem.id)
@@ -336,12 +356,12 @@ export const useChat = (
                       : []),
                   ],
                   more: {
-                    time: dayjs.unix(newResponseItem.created_at).format('hh:mm A'),
+                    time: formatTime(newResponseItem.created_at, 'hh:mm A'),
                     tokens: newResponseItem.answer_tokens + newResponseItem.message_tokens,
                     latency: newResponseItem.provider_response_latency.toFixed(2),
                   },
                   // for agent log
-                  conversationId: connversationId.current,
+                  conversationId: conversationId.current,
                   input: {
                     inputs: newResponseItem.inputs,
                     query: newResponseItem.query,
@@ -466,8 +486,45 @@ export const useChat = (
             }
           }))
         },
+        onIterationStart: ({ data }) => {
+          responseItem.workflowProcess!.tracing!.push({
+            ...data,
+            status: WorkflowRunningStatus.Running,
+          } as any)
+          handleUpdateChatList(produce(chatListRef.current, (draft) => {
+            const currentIndex = draft.findIndex(item => item.id === responseItem.id)
+            draft[currentIndex] = {
+              ...draft[currentIndex],
+              ...responseItem,
+            }
+          }))
+          isInIteration = true
+        },
+        onIterationFinish: ({ data }) => {
+          const tracing = responseItem.workflowProcess!.tracing!
+          tracing[tracing.length - 1] = {
+            ...tracing[tracing.length - 1],
+            ...data,
+            status: WorkflowRunningStatus.Succeeded,
+          } as any
+
+          handleUpdateChatList(produce(chatListRef.current, (draft) => {
+            const currentIndex = draft.findIndex(item => item.id === responseItem.id)
+            draft[currentIndex] = {
+              ...draft[currentIndex],
+              ...responseItem,
+            }
+          }))
+          isInIteration = false
+        },
         onNodeStarted: ({ data }) => {
-          responseItem.workflowProcess!.tracing!.push(data as any)
+          if (isInIteration)
+            return
+
+          responseItem.workflowProcess!.tracing!.push({
+            ...data,
+            status: WorkflowRunningStatus.Running,
+          } as any)
           handleUpdateChatList(produce(chatListRef.current, (draft) => {
             const currentIndex = draft.findIndex(item => item.id === responseItem.id)
             draft[currentIndex] = {
@@ -477,6 +534,9 @@ export const useChat = (
           }))
         },
         onNodeFinished: ({ data }) => {
+          if (isInIteration)
+            return
+
           const currentIndex = responseItem.workflowProcess!.tracing!.findIndex(item => item.node_id === data.node_id)
           responseItem.workflowProcess!.tracing[currentIndex] = data as any
           handleUpdateChatList(produce(chatListRef.current, (draft) => {
@@ -486,6 +546,15 @@ export const useChat = (
               ...responseItem,
             }
           }))
+        },
+        onTTSChunk: (messageId: string, audio: string) => {
+          if (!audio || audio === '')
+            return
+          player.playAudioWithAudio(audio, true)
+          AudioPlayerManager.getInstance().resetMsgId(messageId)
+        },
+        onTTSEnd: (messageId: string, audio: string) => {
+          player.playAudioWithAudio(audio, false)
         },
       })
     return true
@@ -498,6 +567,7 @@ export const useChat = (
     promptVariablesConfig,
     handleUpdateChatList,
     handleResponding,
+    formatTime,
   ])
 
   const handleAnnotationEdited = useCallback((query: string, answer: string, index: number) => {
@@ -570,7 +640,7 @@ export const useChat = (
   return {
     chatList,
     setChatList,
-    conversationId: connversationId.current,
+    conversationId: conversationId.current,
     isResponding,
     setIsResponding,
     handleSend,

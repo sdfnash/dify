@@ -1,12 +1,14 @@
+from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from core.app.app_config.entities import AppConfig, EasyUIBasedAppConfig, WorkflowUIBasedAppConfig
 from core.entities.provider_configuration import ProviderModelBundle
 from core.file.file_obj import FileVar
 from core.model_runtime.entities.model_entities import AIModelEntity
+from core.ops.ops_trace_manager import TraceQueueManager
 
 
 class InvokeFrom(Enum):
@@ -62,6 +64,9 @@ class ModelConfigWithCredentialsEntity(BaseModel):
     parameters: dict[str, Any] = {}
     stop: list[str] = []
 
+    # pydantic configs
+    model_config = ConfigDict(protected_namespaces=())
+
 
 class AppGenerateEntity(BaseModel):
     """
@@ -72,7 +77,7 @@ class AppGenerateEntity(BaseModel):
     # app config
     app_config: AppConfig
 
-    inputs: dict[str, str]
+    inputs: Mapping[str, Any]
     files: list[FileVar] = []
     user_id: str
 
@@ -80,8 +85,17 @@ class AppGenerateEntity(BaseModel):
     stream: bool
     invoke_from: InvokeFrom
 
+    # invoke call depth
+    call_depth: int = 0
+
     # extra parameters, like: auto_generate_conversation_name
     extras: dict[str, Any] = {}
+
+    # tracing instance
+    trace_manager: Optional[TraceQueueManager] = None
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class EasyUIBasedAppGenerateEntity(AppGenerateEntity):
@@ -90,9 +104,12 @@ class EasyUIBasedAppGenerateEntity(AppGenerateEntity):
     """
     # app config
     app_config: EasyUIBasedAppConfig
-    model_config: ModelConfigWithCredentialsEntity
+    model_conf: ModelConfigWithCredentialsEntity
 
     query: Optional[str] = None
+
+    # pydantic configs
+    model_config = ConfigDict(protected_namespaces=())
 
 
 class ChatAppGenerateEntity(EasyUIBasedAppGenerateEntity):
@@ -124,8 +141,16 @@ class AdvancedChatAppGenerateEntity(AppGenerateEntity):
     app_config: WorkflowUIBasedAppConfig
 
     conversation_id: Optional[str] = None
-    query: Optional[str] = None
+    query: str
 
+    class SingleIterationRunEntity(BaseModel):
+        """
+        Single Iteration Run Entity.
+        """
+        node_id: str
+        inputs: dict
+
+    single_iteration_run: Optional[SingleIterationRunEntity] = None
 
 class WorkflowAppGenerateEntity(AppGenerateEntity):
     """
@@ -133,3 +158,12 @@ class WorkflowAppGenerateEntity(AppGenerateEntity):
     """
     # app config
     app_config: WorkflowUIBasedAppConfig
+
+    class SingleIterationRunEntity(BaseModel):
+        """
+        Single Iteration Run Entity.
+        """
+        node_id: str
+        inputs: dict
+
+    single_iteration_run: Optional[SingleIterationRunEntity] = None

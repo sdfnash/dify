@@ -29,6 +29,8 @@ const ChatWrapper = () => {
     appMeta,
     handleFeedback,
     currentChatInstanceRef,
+    appData,
+    themeBuilder,
   } = useChatWithHistoryContext()
   const appConfig = useMemo(() => {
     const config = appParams || {}
@@ -128,6 +130,7 @@ const ChatWrapper = () => {
 
   return (
     <Chat
+      appData={appData}
       config={appConfig}
       chatList={chatList}
       isResponding={isResponding}
@@ -140,6 +143,8 @@ const ChatWrapper = () => {
       allToolIcons={appMeta?.tool_icons || {}}
       onFeedback={handleFeedback}
       suggestedQuestions={suggestedQuestions}
+      hideProcessDetail
+      themeBuilder={themeBuilder}
     />
   )
 }
